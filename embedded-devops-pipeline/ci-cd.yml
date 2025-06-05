@@ -1,0 +1,170 @@
+name: Embedded Firmware CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  FIRMWARE_NAME: embedded-firmware
+  TOOLCHAIN: arm-none-eabi-gcc
+  TARGET: ARM_Cortex-M4
+
+jobs:
+  build:
+    name: Build and Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install ARM Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+          arm-none-eabi-gcc --version
+
+      - name: Build Firmware
+        run: |
+          mkdir -p build
+          arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -nostdlib \
+            -T linker_script.ld -Wl,-Map=build/firmware.map \
+            -o build/${{ env.FIRMWARE_NAME }}.elf src/main.c src/startup.c
+          arm-none-eabi-size build/${{ env.FIRMWARE_NAME }}.elf
+
+      - name: Generate Build Metadata
+        id: metadata
+        run: |
+          echo "GIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "GIT_TAG=$(git describe --tags --always --dirty 2>/dev/null || echo 'untagged')" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+          echo "TOOLCHAIN_VERSION=$(arm-none-eabi-gcc --version | head -n1)" >> $GITHUB_ENV
+          
+          cat <<EOF > build/metadata.json
+          {
+            "firmware": "${{ env.FIRMWARE_NAME }}",
+            "version": "${{ env.GIT_TAG }}",
+            "git_sha": "${{ env.GIT_SHA }}",
+            "build_date": "${{ env.BUILD_DATE }}",
+            "target": "${{ env.TARGET }}",
+            "toolchain": "${{ env.TOOLCHAIN }}",
+            "toolchain_version": "${{ env.TOOLCHAIN_VERSION }}"
+          }
+          EOF
+          
+          echo "Generated metadata:"
+          cat build/metadata.json
+
+      - name: Generate SBOM
+        run: |
+          cat <<EOF > build/sbom.spdx.json
+          {
+            "SPDXID": "SPDXRef-DOCUMENT",
+            "name": "${{ env.FIRMWARE_NAME }} SBOM",
+            "spdxVersion": "SPDX-2.3",
+            "creationInfo": {
+              "created": "${{ env.BUILD_DATE }}",
+              "creators": [
+                "Tool: GitHub Actions",
+                "Organization: $(echo $GITHUB_REPOSITORY | cut -d'/' -f1)"
+              ],
+              "licenseListVersion": "3.19"
+            },
+            "dataLicense": "CC0-1.0",
+            "documentNamespace": "https://github.com/$GITHUB_REPOSITORY",
+            "documentDescribes": ["SPDXRef-FIRMWARE"],
+            "packages": [
+              {
+                "SPDXID": "SPDXRef-FIRMWARE",
+                "name": "${{ env.FIRMWARE_NAME }}",
+                "versionInfo": "${{ env.GIT_TAG }}",
+                "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": false,
+                "licenseConcluded": "NOASSERTION",
+                "licenseDeclared": "NOASSERTION",
+                "copyrightText": "NOASSERTION",
+                "externalRefs": [
+                  {
+                    "referenceCategory": "PACKAGE_MANAGER",
+                    "referenceLocator": "pkg:github/$GITHUB_REPOSITORY@${{ env.GIT_SHA }}",
+                    "referenceType": "purl"
+                  }
+                ],
+                "primaryPackagePurpose": "APPLICATION"
+              }
+            ],
+            "relationships": [
+              {
+                "spdxElementId": "SPDXRef-DOCUMENT",
+                "relatedSpdxElement": "SPDXRef-FIRMWARE",
+                "relationshipType": "DESCRIBES"
+              }
+            ]
+          }
+          EOF
+          
+          echo "Generated SBOM:"
+          cat build/sbom.spdx.json
+
+      - name: Validate SBOM
+        run: |
+          sudo apt-get install -y python3-pip
+          pip install jsonschema
+          python3 scripts/validate_sbom.py build/sbom.spdx.json
+
+      - name: Generate Artifact Hashes
+        run: |
+          cd build
+          sha256sum ${{ env.FIRMWARE_NAME }}.elf > ${{ env.FIRMWARE_NAME }}.sha256
+          sha256sum metadata.json >> ${{ env.FIRMWARE_NAME }}.sha256
+          sha256sum sbom.spdx.json >> ${{ env.FIRMWARE_NAME }}.sha256
+          cat ${{ env.FIRMWARE_NAME }}.sha256
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-artifacts
+          path: |
+            build/${{ env.FIRMWARE_NAME }}.elf
+            build/${{ env.FIRMWARE_NAME }}.map
+            build/metadata.json
+            build/sbom.spdx.json
+            build/${{ env.FIRMWARE_NAME }}.sha256
+
+  test:
+    name: Hardware Validation
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: firmware-artifacts
+          path: artifacts
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm
+
+      - name: Run QEMU Test
+        run: |
+          qemu-system-arm -machine netduinoplus2 -cpu cortex-m4 \
+            -nographic -kernel artifacts/${{ env.FIRMWARE_NAME }}.elf \
+            -serial file:test_output.log
+          
+          echo "Test output:"
+          cat test_output.log
+          
+          # Verify test output contains expected patterns
+          grep -q "System initialized" test_output.log || exit 1
+          grep -q "Running main loop" test_output.log || exit 1
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: test_output.log

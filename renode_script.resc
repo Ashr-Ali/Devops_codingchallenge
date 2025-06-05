@@ -1,0 +1,16 @@
+using sysbus
+
+# Load the firmware
+$bin?=@blinky.elf
+mach create
+machine LoadPlatformDescription @platforms/cpus/stm32f4xx.repl
+
+# Load the binary
+sysbus LoadELF $bin
+
+# Create UART recorder
+emulation CreateUARTSink "uart1" "simulation_output.log"
+
+# Start the simulation
+emulation SetGlobalQuantum "0.00001"
+machine Start
