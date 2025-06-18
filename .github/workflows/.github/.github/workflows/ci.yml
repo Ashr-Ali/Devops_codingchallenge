@@ -1,28 +1,96 @@
-name: CI Workflow
+name: Embedded DevOps CI/CD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - dev
   pull_request:
-    branches: [main]
 
 jobs:
   build:
+    name: Build Firmware + Generate Artifacts
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout source code
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+    - name: Set up ARM GCC toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
 
-      - name: Run dummy test
-        run: echo "✅ Build and install successful!"
+    - name: Set up QEMU
+      run: sudo apt-get install -y qemu-system-arm
+
+    - name: Build firmware
+      run: |
+        mkdir -p build
+        arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -nostdlib \
+        -T src/linker_script.ld -Wl,-Map=build/firmware.map \
+        -o build/firmware.elf src/main.c src/startup.c
+
+    - name: Generate build metadata
+      run: ./scripts/generate_metadata.sh firmware
+
+    - name: Generate SPDX SBOM
+      run: ./scripts/generate_sbom.sh firmware
+
+    - name: Validate SBOM
+      run: python3 scripts/verify_sbom.py firmware.spdx.json
+
+    - name: Compute SHA256 checksum
+      run: sha256sum build/firmware.elf > build/firmware.sha256
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-artifacts
+        path: |
+          build/firmware.elf
+          build/firmware.map
+          build/firmware.sha256
+          firmware_metadata.json
+          firmware.spdx.json
+
+  test:
+    name: Run QEMU Tests
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware-artifacts
+        path: build
+
+    - name: Run firmware in QEMU
+      run: |
+        qemu-system-arm -machine netduinoplus2 -cpu cortex-m4 \
+        -nographic -kernel build/firmware.elf \
+        -serial file:test_output.log
+
+    - name: Verify test output
+      run: python3 tests/test_runner.py test_output.log
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs
+        path: test_output.log
