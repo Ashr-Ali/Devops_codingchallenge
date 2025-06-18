@@ -123,3 +123,31 @@ Captures UART output
 Verifies expected behavior
 
 Stores test results
+
+
+
+# DevOps Coding Challenge
+
+This project is a submission for the DevOps coding challenge.
+
+## Features
+
+- CI pipeline using GitHub Actions
+- [Add your features here, like Docker, Terraform, etc.]
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.10+
+- [Add other tools if needed, e.g., Docker, Terraform, etc.]
+
+### Installation
+
+```bash
+git clone https://github.com/Ashr-Ali/Devops_codingchallenge.git
+cd Devops_codingchallenge
+python -m venv venv
+source venv/bin/activate  # or venv\Scripts\activate on Windows
+pip install -r requirements.txt
+
